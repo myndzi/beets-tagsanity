@@ -1,6 +1,6 @@
 from functools import reduce
 from types import NoneType
-from typing import Union
+from typing import List, Union
 import unicodedata
 
 from beets.autotag import TrackInfo, AlbumInfo
@@ -15,6 +15,11 @@ VALID_NORMALIZE_MODES = ["NFC", "NFKC", "NFD", "NFKD", None]
 CONFIG_DEFAULT = {
     "langs_enabled": AVAILABLE_LANG_CODES,
     "tidy_unihandecode": True,
+    "drop_feats_from_fields": [
+        "artist",
+        "artist_sort",
+        "title",
+    ],
     "simplify_whitespace": True,
     "simplify_hyphens": True,
     "simplify_curly_quotes": True,
@@ -40,6 +45,7 @@ CONFIG_DEFAULT = {
 CONFIG_SCHEMA = {
     "langs_enabled": Sequence(Choice(AVAILABLE_LANG_CODES)),
     "tidy_unihandecode": bool,
+    "drop_feats_from_fields": Sequence(str),
     "simplify_whitespace": bool,
     "simplify_hyphens": bool,
     "simplify_curly_quotes": bool,
@@ -64,6 +70,7 @@ class TagSanity(BeetsPlugin):
         # album info.
         self.pending_albums = {}
         self.pending_tracks = {}
+        self.track_join_phrases = {}
 
         self.setup()
 
@@ -85,22 +92,25 @@ class TagSanity(BeetsPlugin):
         validated = self.config.get(CONFIG_SCHEMA)
 
         # the set of Unihandecoder-supported languages to transliterate
-        self.langs_enabled = validated["langs_enabled"]
-        self.tidy_unihandecode = validated["tidy_unihandecode"]
+        self.langs_enabled: List[str] = validated["langs_enabled"]
+        self.tidy_unihandecode: bool = validated["tidy_unihandecode"]
+
+        # the list of fields from which to drop featured artist info
+        self.drop_feats_from_fields: List[str] = validated["drop_feats_from_fields"]
 
         # Unicode simplifications
-        self.simplify_whitespace = validated["simplify_whitespace"]
-        self.simplify_hyphens = validated["simplify_hyphens"]
-        self.simplify_curly_quotes = validated["simplify_curly_quotes"]
-        self.simplify_brackets = validated["simplify_brackets"]
-        self.left_bracket = validated["left_bracket"]
-        self.right_bracket = validated["right_bracket"]
+        self.simplify_whitespace: bool = validated["simplify_whitespace"]
+        self.simplify_hyphens: bool = validated["simplify_hyphens"]
+        self.simplify_curly_quotes: bool = validated["simplify_curly_quotes"]
+        self.simplify_brackets: bool = validated["simplify_brackets"]
+        self.left_bracket: str = validated["left_bracket"]
+        self.right_bracket: str = validated["right_bracket"]
 
-        self.unicode_normalization_mode = validated["unicode_normalization_mode"]
+        self.unicode_normalization_mode: str = validated["unicode_normalization_mode"]
 
         # The set of fields that exist (on both AlbumInfo and TrackInfo)
         # to perform translations on.
-        self.process_fields = validated["process_fields"]
+        self.process_fields: List[str] = validated["process_fields"]
 
         # acceptable inputs taken from:
         # https://codeberg.org/miurahr/unihandecode/src/commit/991dd18aac14301f232c04bd87ba6013f6bd5a53/src/unihandecode/__init__.py#L38-L49
@@ -121,7 +131,7 @@ class TagSanity(BeetsPlugin):
 
         # The ISO_15924 script "Hani" is ambiguous as to what language it is representing. It could be Hanzi, Kanji, or Hanja.
         # Setting this value selects which language to assume when encountering this script, in the absence of all other cues.
-        self.han_preference = validated["han_preference"]
+        self.han_preference: str = validated["han_preference"]
 
         # fmt: off
         # Mappings of various representations of languages/scripts to Unihandecoder
@@ -250,15 +260,32 @@ class TagSanity(BeetsPlugin):
             decoder (Unidecoder): The Unihandecoder instance to use for transliteration
             dict (Union[AlbumInfo, TrackInfo]): The info object to process
         """
-        self._log.info("updating fields on object")
         for field in self.process_fields:
             if hasattr(obj, field):
                 val = getattr(obj, field)
                 if isinstance(val, str):
                     clean = self._process_string(decoder, val)
-                    self._log.info("{0}: {1} -> {2}", field, val, clean)
                     if clean != val:
                         setattr(obj, field, clean)
+
+    def _scrub_track_feats(self, info: TrackInfo) -> NoneType:
+        """Mutates a track to remove the first join phrase and
+           everything afterwards. Inverts the implicit/unconfigurable
+           behavior in mb.py
+
+        Args:
+            info (TrackInfo): a TrackInfo object
+        """
+
+        if info.track_id in self.track_join_phrases:
+            join_phrase = self.track_join_phrases.pop(info.track_id)
+
+            for key in self.drop_feats_from_fields:
+                if not hasattr(info, key):
+                    continue
+
+                val = getattr(info, key)
+                setattr(info, key, val.split(join_phrase)[0])
 
     def _trackinfo_received(self, info: TrackInfo) -> NoneType:
         """Hook callback for when beets has created the initial TrackInfo object.
@@ -280,25 +307,23 @@ class TagSanity(BeetsPlugin):
             ] = info  # store the whole info object under the recording id
 
     def _mb_track_extract(self, data) -> NoneType:
-        """Hook callback for when beets has finished all MusicBrainz track processing.
-        Ignored if this track is part of an album process; not yet implemented
-        if this track is being processed individually.
+        """Store the join phrase for a given track, in order to more-correctly
+           remove it later. This callback gets called before the "received"
+           callback, so we can capture the raw join phrase from the API response
+           before losing it to rendering all the credits into a string.
 
         Args:
-            data: A musicbrainzngs API response for a recording
+            data: Musicbrainz API response for a recording
         """
-        # we only attempt to do anything at the "track" level if we can't do it at the "album"
-        # level. in the MusicBrainz data model, the properties we care about (language, script)
-        # are only associated with a release, and tracks aren't associated with a single release.
-        id = data.get("id")
-        if not id or id not in self.pending_tracks:
-            return None
+        try:
+            join_phrase = next(
+                filter(lambda x: isinstance(x, str), data["artist-credit"])
+            )
+            if join_phrase:
+                self.track_join_phrases[data["id"]] = join_phrase
 
-        # to make a guess, we'll have to consult the information on *all* releases that include
-        # this track. luckily, that information appears to be included from the API.
-        # TODO: will invocations of mbsync cause album or track updates, or is it context dependent?
-        self.pending_tracks.pop(id)
-        raise "not implemented yet"
+        except (StopIteration, KeyError):
+            pass
 
     def _albuminfo_received(self, info: AlbumInfo) -> NoneType:
         """Hook callback for when beets has created the initial AlbumInfo object.
@@ -317,6 +342,8 @@ class TagSanity(BeetsPlugin):
         # information we need at that point (language and script are properties of a
         # release, and recordings aren't inherently associated with a single release)
         for track in info.tracks:
+            if self.drop_feats_from_fields:
+                self._scrub_track_feats(track)
             self._process_object(decoder, track)
 
         self._process_object(decoder, info)

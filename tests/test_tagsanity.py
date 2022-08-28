@@ -59,6 +59,7 @@ class TagsanityPluginTest(unittest.TestCase, TestHelper):
         self._setup_config(
             langs_enabled=[],
             tidy_unihandecode=False,
+            drop_feats_from_fields=[],
             simplify_whitespace=False,
             simplify_hyphens=False,
             simplify_curly_quotes=False,
@@ -80,6 +81,7 @@ class TagsanityPluginTest(unittest.TestCase, TestHelper):
         self._setup_config(
             langs_enabled=[],
             tidy_unihandecode=False,
+            drop_feats_from_fields=[],
             simplify_whitespace=False,
             simplify_hyphens=False,
             simplify_curly_quotes=False,
@@ -106,6 +108,7 @@ class TagsanityPluginTest(unittest.TestCase, TestHelper):
             plugin_config = {
                 "langs_enabled": [],
                 "tidy_unihandecode": False,
+                "drop_feats_from_fields": [],
                 "simplify_whitespace": False,
                 "simplify_hyphens": False,
                 "simplify_curly_quotes": False,
@@ -164,6 +167,7 @@ class TagsanityPluginTest(unittest.TestCase, TestHelper):
             self._setup_config(
                 langs_enabled=tagsanity.AVAILABLE_LANG_CODES,
                 tidy_unihandecode=False,
+                drop_feats_from_fields=[],
                 simplify_whitespace=False,
                 simplify_hyphens=False,
                 simplify_curly_quotes=False,
@@ -183,6 +187,7 @@ class TagsanityPluginTest(unittest.TestCase, TestHelper):
         self._setup_config(
             langs_enabled=[],
             tidy_unihandecode=False,
+            drop_feats_from_fields=[],
             simplify_whitespace=False,
             simplify_hyphens=False,
             simplify_curly_quotes=False,
@@ -223,6 +228,7 @@ class TagsanityPluginTest(unittest.TestCase, TestHelper):
                 self._setup_config(
                     langs_enabled=enabled,
                     tidy_unihandecode=False,
+                    drop_feats_from_fields=[],
                     simplify_whitespace=False,
                     simplify_hyphens=False,
                     simplify_curly_quotes=False,
@@ -264,6 +270,7 @@ class TagsanityPluginTest(unittest.TestCase, TestHelper):
             self._setup_config(
                 langs_enabled=tagsanity.AVAILABLE_LANG_CODES,
                 tidy_unihandecode=enabled,
+                drop_feats_from_fields=[],
                 simplify_whitespace=False,
                 simplify_hyphens=False,
                 simplify_curly_quotes=False,
@@ -322,6 +329,35 @@ class TagsanityPluginTest(unittest.TestCase, TestHelper):
 
         self.assertEqual("title Mei", track.title)
         self.assertEqual("album Mei", album.album)
+
+    def test_drop_feats(self):
+        self._setup_config(
+            drop_feats_from_fields=["title"],
+        )
+        track = TrackInfo(
+            track_id="mocktrack", title="foo feat. bar", artist="foo feat. bar"
+        )
+        album = AlbumInfo(
+            album_id="mockrelease",
+            album="album",
+            tracks=[track],
+        )
+        self.plugin._mb_track_extract(
+            {
+                "id": "mocktrack",
+                "artist-credit": [
+                    {
+                        "artist": {"name": "foo"},
+                    },
+                    " feat. ",
+                    {"artist": {"name": "bar"}},
+                ],
+            }
+        )
+        self.plugin._albuminfo_received(album)
+
+        self.assertEqual(track.title, "foo")
+        self.assertEqual(track.artist, "foo feat. bar")
 
     # TODO:
     # it actually works! but, Unihandecode isn't actually much of an improvement. readings
