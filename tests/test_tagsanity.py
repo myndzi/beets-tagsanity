@@ -332,14 +332,15 @@ class TagsanityPluginTest(unittest.TestCase, TestHelper):
 
     def test_drop_feats(self):
         self._setup_config(
-            drop_feats_from_fields=["title"],
+            drop_feats_from_fields=["artist"],
         )
         track = TrackInfo(
             track_id="mocktrack", title="foo feat. bar", artist="foo feat. bar"
         )
         album = AlbumInfo(
             album_id="mockrelease",
-            album="album",
+            album="album feat. bar",
+            artist="foo feat. bar",
             tracks=[track],
         )
         self.plugin._mb_track_extract(
@@ -354,10 +355,27 @@ class TagsanityPluginTest(unittest.TestCase, TestHelper):
                 ],
             }
         )
+        self.plugin._mb_album_extract(
+            {
+                "id": "mockrelease",
+                "artist-credit": [
+                    {
+                        "artist": {"name": "foo"},
+                    },
+                    " feat. ",
+                    {"artist": {"name": "bar"}},
+                ],
+            }
+        )
         self.plugin._albuminfo_received(album)
 
-        self.assertEqual(track.title, "foo")
-        self.assertEqual(track.artist, "foo feat. bar")
+        # should only remove from configured fields
+        self.assertEqual(track.title, "foo feat. bar")
+        self.assertEqual(album.album, "album feat. bar")
+
+        # artist works for both track and album
+        self.assertEqual(track.artist, "foo")
+        self.assertEqual(album.artist, "foo")
 
     # TODO:
     # it actually works! but, Unihandecode isn't actually much of an improvement. readings

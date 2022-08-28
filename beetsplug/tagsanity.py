@@ -64,15 +64,9 @@ class TagSanity(BeetsPlugin):
     def __init__(self):
         super(TagSanity, self).__init__()
 
-        # Beets's hook api doesn't give us the information we need at the place
-        # where we need it. Instead, we store the AlbumInfo data by its release ID,
-        # which we have available in both hooks. All the TrackInfo data is available
-        # on the AlbumInfo structure. We can therefore return a value from
-        # the `mb_album_extract` hook that will completely update both track and
-        # album info.
-        self.pending_albums = {}
-        self.pending_tracks = {}
+        # catch the join phrase from the _mb_*_extract events for use later
         self.track_join_phrases = {}
+        self.album_join_phrases = {}
 
         self.setup()
 
@@ -182,7 +176,7 @@ class TagSanity(BeetsPlugin):
         self.register_listener("trackinfo_received", self._trackinfo_received)
         self.register_listener("mb_track_extract", self._mb_track_extract)
         self.register_listener("albuminfo_received", self._albuminfo_received)
-        # self.register_listener("mb_album_extract", self._mb_album_extract)
+        self.register_listener("mb_album_extract", self._mb_album_extract)
 
     def _get_decoder(self, lang, script):
         mapped_lang = None
@@ -270,22 +264,31 @@ class TagSanity(BeetsPlugin):
                     if clean != val:
                         setattr(obj, field, clean)
 
-    def _scrub_track_feats(self, info: TrackInfo) -> NoneType:
+    def _scrub_feats(self, info: Union[TrackInfo, AlbumInfo]) -> NoneType:
         """Mutates a track to remove the first join phrase and
            everything afterwards. Inverts the implicit/unconfigurable
            behavior in mb.py
 
         Args:
-            info (TrackInfo): a TrackInfo object
+            info (Union[TrackInfo, AlbumInfo]): object to scrub feats from
         """
 
-        if info.track_id in self.track_join_phrases:
-            join_phrase = self.track_join_phrases.pop(info.track_id)
+        if not self.drop_feats_from_fields:
+            return
 
-            for key in self.drop_feats_from_fields:
-                if not hasattr(info, key):
-                    continue
+        join_phrase = None
+        if isinstance(info, TrackInfo):
+            if info.track_id in self.track_join_phrases:
+                join_phrase = self.track_join_phrases.pop(info.track_id)
+        elif isinstance(info, AlbumInfo):
+            if info.album_id in self.album_join_phrases:
+                join_phrase = self.album_join_phrases.pop(info.album_id)
 
+        if not join_phrase:
+            return
+
+        for key in self.drop_feats_from_fields:
+            if hasattr(info, key):
                 val = getattr(info, key)
                 setattr(info, key, val.split(join_phrase)[0])
 
@@ -327,6 +330,25 @@ class TagSanity(BeetsPlugin):
         except (StopIteration, KeyError):
             pass
 
+    def _mb_album_extract(self, data) -> NoneType:
+        """Store the join phrase for a given album, in order to more-correctly
+           remove it later. This callback gets called before the "received"
+           callback, so we can capture the raw join phrase from the API response
+           before losing it to rendering all the credits into a string.
+
+        Args:
+            data: Musicbrainz API response for a release
+        """
+        try:
+            join_phrase = next(
+                filter(lambda x: isinstance(x, str), data["artist-credit"])
+            )
+            if join_phrase:
+                self.album_join_phrases[data["id"]] = join_phrase
+
+        except (StopIteration, KeyError):
+            pass
+
     def _albuminfo_received(self, info: AlbumInfo) -> NoneType:
         """Hook callback for when beets has created the initial AlbumInfo object.
         Rewrites the configured fields of the album associated with this release and
@@ -344,8 +366,8 @@ class TagSanity(BeetsPlugin):
         # information we need at that point (language and script are properties of a
         # release, and recordings aren't inherently associated with a single release)
         for track in info.tracks:
-            if self.drop_feats_from_fields:
-                self._scrub_track_feats(track)
+            self._scrub_feats(track)
             self._process_object(decoder, track)
 
+        self._scrub_feats(info)
         self._process_object(decoder, info)
